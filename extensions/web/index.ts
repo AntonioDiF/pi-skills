@@ -146,7 +146,7 @@ function candidateInstances(maxTries: number): string[] {
 	for (let i = 0; i < pool.length && out.length < maxTries; i++) {
 		out.push(pool[(rrCursor + i) % pool.length]);
 	}
-	rrCursor = (rrCursor + out.length) % pool.length;
+	rrCursor = (rrCursor + 1) % pool.length;
 	return out;
 }
 
