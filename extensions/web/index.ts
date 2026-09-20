@@ -1022,7 +1022,7 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 		!textMime &&
 		contentType !== "application/octet-stream" &&
 		(/^(image|audio|video|font)\//.test(contentType) || /^(application|model)\//.test(contentType));
-	if (binaryMime || !looksLikeText(raw)) {
+	if (binaryMime || (!textMime && !looksLikeText(raw))) {
 		return {
 			lines: null,
 			note: `Binary content: ${contentType || "unknown type"}, ${raw.length} bytes (not displayed)`,
