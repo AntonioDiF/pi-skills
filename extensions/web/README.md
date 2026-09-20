@@ -11,6 +11,10 @@ Searches the web and returns titles, URLs and snippets.
 - Tries **SearXNG instances round-robin** (up to 4 per query) with per-instance
   health tracking: failures escalate into cooldowns (30 s → 10 min), instances
   that return 0 results are briefly demoted.
+- If an instance returns 0 results while reporting its engines as suspended
+  (`unresponsive_engines`, e.g. DDG anomaly check) the query is retried once
+  without the `language`/`category`/`engines` filters; suspended engines are
+  listed in the output's backend notes.
 - Falls back to **DuckDuckGo** (HTML endpoint) if all SearXNG instances fail.
 - `provider` parameter can force `searxng` or `duckduckgo` (default `auto`).
 - Optional filters: `language`, `time_range` (day/week/month/year), `category`,

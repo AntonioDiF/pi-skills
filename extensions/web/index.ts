@@ -5,6 +5,9 @@
  *   web_search — search the web. Tries SearXNG instances round-robin (with
  *                per-instance health tracking/cooldowns) and falls back to
  *                DuckDuckGo. This spreads load so no single backend throttles you.
+ *                If an instance returns 0 results while reporting its engines
+ *                as suspended, the query is retried once without the
+ *                language/category/engines filters.
  *   web_fetch  — fetch a URL and return it as text. Supports:
  *                 - heading:  "Install"   → only the section under that heading
  *                 - pattern:  "foo.*bar"  → grep mode (line numbers + context)
@@ -157,12 +160,19 @@ async function fetchWithTimeout(
 	});
 }
 
+export interface SearxngOutcome {
+	results: SearchResult[];
+	/** [engine, reason] pairs the instance reports as down (unresponsive_engines). */
+	unresponsive: [string, string][];
+	droppedFilters?: boolean;
+}
+
 export async function searxngSearch(
 	base: string,
 	q: string,
 	opts: SearchOptions,
 	signal?: AbortSignal,
-): Promise<SearchResult[]> {
+): Promise<SearxngOutcome> {
 	const u = new URL(base + "/search");
 	u.searchParams.set("q", q);
 	u.searchParams.set("format", "json");
@@ -176,17 +186,25 @@ export async function searxngSearch(
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	const ct = res.headers.get("content-type") ?? "";
 	if (!ct.includes("json")) throw new Error("JSON format disabled on this instance");
-	const data: unknown = await res.json();
-	const results = (data as { results?: unknown })?.results;
+	const data = (await res.json()) as { results?: unknown; unresponsive_engines?: unknown };
+	const results = data.results;
 	if (!Array.isArray(results)) throw new Error("unexpected response shape");
-	return (results as Array<Record<string, unknown>>)
-		.map((r) => ({
-			title: String(r.title ?? "").trim(),
-			url: String(r.url ?? "").trim(),
-			snippet: typeof r.content === "string" && r.content.trim() ? r.content.trim() : undefined,
-		}))
-		.filter((r) => r.url)
-		.slice(0, 20);
+	const unresponsive: [string, string][] = Array.isArray(data.unresponsive_engines)
+		? data.unresponsive_engines
+				.filter((e): e is [unknown, unknown] => Array.isArray(e) && e.length >= 2)
+				.map((e) => [String(e[0]), String(e[1])])
+		: [];
+	return {
+		results: (results as Array<Record<string, unknown>>)
+			.map((r) => ({
+				title: String(r.title ?? "").trim(),
+				url: String(r.url ?? "").trim(),
+				snippet: typeof r.content === "string" && r.content.trim() ? r.content.trim() : undefined,
+			}))
+			.filter((r) => r.url)
+			.slice(0, 20),
+		unresponsive,
+	};
 }
 
 const DDG_DUR: Record<string, string> = { day: "d", week: "w", month: "m", year: "y" };
@@ -279,10 +297,20 @@ export async function searchWeb(
 			const host = safeHost(base);
 			try {
 				onProgress?.(`searching searxng:${host}…`);
-				const results = await searxngSearch(base, q, opts, signal);
-				if (results.length > 0) {
+				let resp = await searxngSearch(base, q, opts, signal);
+				if (resp.results.length === 0 && resp.unresponsive.length > 0 && (opts.language || opts.category || opts.engines)) {
+					// Instance reports its engines as suspended: filters can trip per-engine
+					// quirks (e.g. DDG anomaly check) — retry once without them.
+					onProgress?.(`searching searxng:${host} (retry, filters dropped)…`);
+					const retry = await searxngSearch(base, q, { ...opts, language: undefined, category: undefined, engines: undefined }, signal);
+					if (retry.results.length > 0) resp = { ...retry, droppedFilters: true };
+				}
+				if (resp.results.length > 0) {
 					markOk(base);
-					return { results: results.slice(0, count), provider: `searxng:${host}`, errors };
+					return { results: resp.results.slice(0, count), provider: `searxng:${host}${resp.droppedFilters ? " (filters dropped)" : ""}`, errors };
+				}
+				if (resp.unresponsive.length > 0) {
+					errors.push(`${host}: engines down (${resp.unresponsive.map(([e, w]) => `${e} ${w}`).join("; ")})`);
 				}
 				emptyCount++;
 				emptyProvider = `searxng:${host}`;
