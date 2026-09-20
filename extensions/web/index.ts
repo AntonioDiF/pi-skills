@@ -1036,7 +1036,7 @@ function makeTextView(tui: { requestRender(): void }, title: string, lines: stri
 				return;
 			}
 			if (data === "j" || data === " " || data === "\x7f" || data === "\u001b[B") {
-				scroll += height;
+				scroll = Math.min(scroll + height, Math.max(0, lines.length - height));
 				tui.requestRender();
 				return;
 			}
