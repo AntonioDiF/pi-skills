@@ -18,7 +18,7 @@
  *                 - max_chars  → hard output cap
  *
  * Commands:
- *   /web search <query> [count]
+ *   /web search <query> [=<n>]
  *   /web fetch <url>
  *   /web instances        → show SearXNG instance + Firecrawl health
  *   /web help
@@ -1348,7 +1348,7 @@ export default function webExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("web", {
-		description: "Web: /web search <query> [count] | /web fetch <url> | /web instances | /web help",
+		description: "Web: /web search <query> [=<n>] | /web fetch <url> | /web instances | /web help",
 		handler: async (args, ctx) => {
 			const parts = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			const show = async (text: string) => {
@@ -1363,7 +1363,7 @@ export default function webExtension(pi: ExtensionAPI) {
 			if (parts.length === 0 || parts[0] === "help" || parts[0] === "-h") {
 				const help = [
 					"pi-web commands:",
-					"  /web search <query> [count]   web search",
+					"  /web search <query> [=<n>]   web search (count via =N)",
 					"  /web fetch <url>              fetch page as text",
 					"  /web instances                SearXNG instance + Firecrawl health",
 					"",
@@ -1376,9 +1376,14 @@ export default function webExtension(pi: ExtensionAPI) {
 			try {
 				let text: string;
 				if (parts[0] === "search") {
+					let count = 8;
+					const last = parts[parts.length - 1];
+					if (parts.length > 2 && /^=\d+$/.test(last)) {
+						count = Number(last.slice(1));
+						parts.pop();
+					}
 					const query = parts.slice(1).join(" ");
-					if (!query) throw new Error("usage: /web search <query> [count]");
-					const count = parts.length > 2 ? Number(parts[parts.length - 1]) || 8 : 8;
+					if (!query) throw new Error("usage: /web search <query> [=<n>]");
 					const res = await searchWeb(query, { query, count });
 					text = formatSearchResults(query, res.provider, res.results, res.errors);
 				} else if (parts[0] === "fetch") {

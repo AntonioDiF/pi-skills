@@ -57,7 +57,7 @@ refetch with `heading=`/`offset`+`limit` to page through it.
 ## Command
 
 ```
-/web search <query> [count]
+/web search <query> [=<n>]   # count via =5; bare numbers stay in the query ("iPhone 16")
 /web fetch <url>
 /web instances     # SearXNG instance + Firecrawl health, rotation cursor
 /web help
