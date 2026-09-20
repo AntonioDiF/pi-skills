@@ -102,7 +102,7 @@ let rrCursor = 0;
 function markFail(base: string) {
 	const h = health.get(base) ?? { fails: 0, cooldownUntil: 0 };
 	h.fails = Math.min(h.fails + 1, 6);
-	h.cooldownUntil = Date.now() + Math.min(10 * 60_000, 30_000 * 2 ** h.fails);
+	h.cooldownUntil = Date.now() + Math.min(10 * 60_000, 30_000 * 2 ** (h.fails - 1));
 	health.set(base, h);
 }
 function markWeak(base: string) {
