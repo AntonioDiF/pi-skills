@@ -431,6 +431,16 @@ function tagAttr(tag: string, name: string): string | undefined {
 	return v === undefined ? "" : decodeEntities(v);
 }
 
+/** Content attribute of the first <meta> whose name matches (case-insensitive). */
+function metaContent(html: string, name: string): string | undefined {
+	const re = /<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(html))) {
+		if ((tagAttr(m[0], "name") ?? "").toLowerCase() === name) return tagAttr(m[0], "content");
+	}
+	return undefined;
+}
+
 function stripTagsQuick(html: string): string {
 	return decodeEntities(
 		html
@@ -502,10 +512,7 @@ function flushLine(s: WalkerState, listPrefix?: string) {
 export function htmlToLines(html: string): { lines: string[]; title: string; description?: string; usedMain: boolean } {
 	const titleM = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
 	const title = titleM ? decodeEntities(titleM[1]).replace(/\s+/g, " ").trim() : "";
-	const descM =
-		html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i) ??
-		html.match(/<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i);
-	const description = descM ? decodeEntities(descM[1]).trim() : undefined;
+	const description = (metaContent(html, "description") ?? "").trim() || undefined;
 
 	let source: string;
 	let usedMain = false;
