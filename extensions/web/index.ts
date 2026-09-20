@@ -189,6 +189,8 @@ export async function searxngSearch(
 		.slice(0, 20);
 }
 
+const DDG_DUR: Record<string, string> = { day: "d", week: "w", month: "m", year: "y" };
+
 const DDG_LANG: Record<string, string> = {
 	en: "us-en",
 	de: "de-de",
@@ -243,6 +245,7 @@ export async function ddgSearch(q: string, opts: SearchOptions, signal?: AbortSi
 	const u = new URL("https://html.duckduckgo.com/html/");
 	u.searchParams.set("q", q);
 	u.searchParams.set("kl", (opts.language && DDG_LANG[opts.language]) || "wt-wt");
+	if (opts.time_range) u.searchParams.set("df", DDG_DUR[opts.time_range]);
 	const res = await fetchWithTimeout(u, 10_000, signal, {
 		headers: { "User-Agent": userAgent(), Accept: "text/html" },
 	});
