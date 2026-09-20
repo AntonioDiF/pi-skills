@@ -269,6 +269,7 @@ export async function searchWeb(
 ): Promise<{ results: SearchResult[]; provider: string; errors: string[] }> {
 	const count = Math.min(opts.count ?? 8, 20);
 	const errors: string[] = [];
+	let emptyProvider: string | undefined; // last backend that succeeded with 0 results
 
 	if (opts.provider !== "duckduckgo") {
 		const instances = candidateInstances(4); // cap: don't hammer every instance per query
@@ -284,6 +285,7 @@ export async function searchWeb(
 					return { results: results.slice(0, count), provider: `searxng:${host}`, errors };
 				}
 				emptyCount++;
+				emptyProvider = `searxng:${host}`;
 				markWeak(base);
 			} catch (e) {
 				markFail(base);
@@ -298,12 +300,14 @@ export async function searchWeb(
 			onProgress?.("searching duckduckgo…");
 			const results = await ddgSearch(q, opts, signal);
 			if (results.length > 0) return { results: results.slice(0, count), provider: "duckduckgo", errors };
+			emptyProvider = "duckduckgo";
 			errors.push("duckduckgo: 0 results");
 		} catch (e) {
 			errors.push(`duckduckgo: ${errMsg(e)}`);
 		}
 	}
 
+	if (emptyProvider) return { results: [], provider: emptyProvider, errors };
 	throw new Error(`all search backends failed — ${errors.slice(0, 5).join("; ")}`);
 }
 
