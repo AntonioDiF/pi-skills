@@ -643,6 +643,7 @@ interface WalkerState {
 	lines: string[];
 	buf: string;
 	listDepth: number;
+	liDepth: number;
 	inPre: boolean;
 	inTable: boolean;
 	row: string[];
@@ -654,6 +655,9 @@ interface WalkerState {
 
 function flushLine(s: WalkerState, listPrefix?: string) {
 	if (s.inPre) return;
+	if (listPrefix === undefined && s.liDepth > 0) {
+		listPrefix = "  ".repeat(Math.max(0, s.listDepth - 1)) + "- ";
+	}
 	const text = s.buf.replace(/\s+/g, " ").trim();
 	s.buf = "";
 	if (!text) return;
@@ -691,6 +695,7 @@ export function htmlToLines(html: string): { lines: string[]; title: string; des
 		lines: [],
 		buf: "",
 		listDepth: 0,
+		liDepth: 0,
 		inPre: false,
 		inTable: false,
 		row: [],
@@ -741,7 +746,8 @@ export function htmlToLines(html: string): { lines: string[]; title: string; des
 					break;
 				}
 				case "li": {
-					flushLine(s, "  ".repeat(Math.max(0, s.listDepth - 1)) + "- ");
+					flushLine(s);
+					s.liDepth = Math.max(0, s.liDepth - 1);
 					break;
 				}
 				case "ul":
@@ -839,6 +845,9 @@ export function htmlToLines(html: string): { lines: string[]; title: string; des
 			case "ol":
 				flushLine(s);
 				s.listDepth++;
+				break;
+			case "li":
+				s.liDepth++;
 				break;
 			case "table":
 				flushLine(s);
