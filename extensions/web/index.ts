@@ -570,6 +570,12 @@ function tokenizeHtml(html: string): HtmlToken[] {
 		const end = j >= html.length ? html.length : j + 1;
 		tokens.push({ type: "tag", value: html.slice(lt, end), start: lt, end });
 		i = end;
+		// Raw-text elements: skip content until matching close tag
+		const tagName = /^<(script|style)\b/i.exec(html.slice(lt, end))?.[1];
+		if (tagName) {
+			const closeIdx = html.indexOf(`</${tagName}>`, i);
+			if (closeIdx !== -1) i = closeIdx + tagName.length + 3;
+		}
 	}
 	return tokens;
 }
