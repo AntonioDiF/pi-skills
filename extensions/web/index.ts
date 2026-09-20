@@ -885,12 +885,15 @@ export function grepLines(
 		throw new Error(`invalid regex "${pattern}": ${errMsg(e)}`);
 	}
 	const matches: number[] = [];
-	for (let i = 0; i < lines.length && matches.length < maxMatches; i++) {
+	let total = 0;
+	for (let i = 0; i < lines.length; i++) {
 		re.lastIndex = 0;
-		if (re.test(lines[i])) matches.push(i);
+		if (re.test(lines[i])) {
+			total++;
+			if (matches.length < maxMatches) matches.push(i);
+		}
 	}
-	const total = matches.length;
-	const shown = Math.min(total, maxMatches);
+	const shown = matches.length;
 
 	// Merge [i-context, i+context] ranges
 	const ranges: [number, number][] = [];
