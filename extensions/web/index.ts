@@ -896,10 +896,10 @@ const MAX_FETCH_BYTES = 5_000_000;
  * aborted as soon as the cap is exceeded, so an oversized response is never
  * fully buffered in memory. Returns null when the cap is hit.
  */
-async function readBodyCapped(res: Response): Promise<Buffer | null> {
+async function readBodyCapped(res: Response, cap: number = MAX_FETCH_BYTES): Promise<Buffer | null> {
 	if (!res.body) return Buffer.alloc(0);
 	const cl = Number(res.headers.get("content-length") ?? "");
-	if (Number.isFinite(cl) && cl > MAX_FETCH_BYTES) {
+	if (Number.isFinite(cl) && cl > cap) {
 		await res.body.cancel().catch(() => {});
 		return null;
 	}
@@ -908,7 +908,7 @@ async function readBodyCapped(res: Response): Promise<Buffer | null> {
 	try {
 		for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
 			total += (chunk as Uint8Array).byteLength;
-			if (total > MAX_FETCH_BYTES) {
+			if (total > cap) {
 				await res.body.cancel().catch(() => {});
 				return null;
 			}
@@ -933,9 +933,12 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 	const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
 	const finalUrl = res.url || target;
 	if (!res.ok) {
+		// The snippet is 160 chars, so cap the error body far below the 5MB
+		// fetch cap: a huge error page is never worth buffering more of.
 		let body = "";
 		try {
-			body = (await res.text()).replace(/\s+/g, " ").slice(0, 160);
+			const raw = await readBodyCapped(res, 8_192);
+			if (raw) body = raw.toString("utf-8").replace(/\s+/g, " ").slice(0, 160);
 		} catch {
 			/* ignore */
 		}
