@@ -712,6 +712,37 @@ function normalizeUrl(url: string): string {
 	return u;
 }
 
+const MAX_FETCH_BYTES = 5_000_000;
+
+/**
+ * Read a response body with a hard cap on buffered bytes. The stream is
+ * aborted as soon as the cap is exceeded, so an oversized response is never
+ * fully buffered in memory. Returns null when the cap is hit.
+ */
+async function readBodyCapped(res: Response): Promise<Buffer | null> {
+	if (!res.body) return Buffer.alloc(0);
+	const cl = Number(res.headers.get("content-length") ?? "");
+	if (Number.isFinite(cl) && cl > MAX_FETCH_BYTES) {
+		await res.body.cancel().catch(() => {});
+		return null;
+	}
+	const parts: Uint8Array[] = [];
+	let total = 0;
+	try {
+		for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+			total += (chunk as Uint8Array).byteLength;
+			if (total > MAX_FETCH_BYTES) {
+				await res.body.cancel().catch(() => {});
+				return null;
+			}
+			parts.push(chunk as Uint8Array);
+		}
+	} catch (e) {
+		throw new Error(`body read aborted: ${errMsg(e)}`);
+	}
+	return Buffer.concat(parts);
+}
+
 export async function fetchUrl(url: string, signal?: AbortSignal): Promise<FetchOutcome> {
 	const target = normalizeUrl(url);
 	const res = await fetchWithTimeout(target, 20_000, signal, {
@@ -733,9 +764,16 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 		}
 		throw new Error(`HTTP ${status} for ${finalUrl}${body ? ` — ${body}` : ""}`);
 	}
-	const raw = Buffer.from(await res.arrayBuffer());
-	if (raw.length > 5_000_000) {
-		return { lines: null, note: `Response too large: ${raw.length} bytes (limit 5MB)`, title: "", finalUrl, status, contentType };
+	const raw = await readBodyCapped(res);
+	if (raw === null) {
+		return {
+			lines: null,
+			note: `Response too large: over ${MAX_FETCH_BYTES.toLocaleString("en-US")} bytes (limit 5MB)`,
+			title: "",
+			finalUrl,
+			status,
+			contentType,
+		};
 	}
 	const text = raw.toString("utf-8");
 	const trimmed = text.trimStart();
