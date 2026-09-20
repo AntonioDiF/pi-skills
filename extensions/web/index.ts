@@ -929,6 +929,24 @@ async function readBodyCapped(res: Response, cap: number = MAX_FETCH_BYTES): Pro
 	return Buffer.concat(parts);
 }
 
+/**
+ * Sniff a buffer for text-likeness. A NUL byte is a strong binary
+ * indicator, as is a high density of non-printable control characters.
+ * Used to classify responses with missing or ambiguous MIME types
+ * (e.g. application/octet-stream).
+ */
+function looksLikeText(buf: Buffer): boolean {
+	const n = Math.min(buf.length, 8_000);
+	if (n === 0) return true;
+	let control = 0;
+	for (let i = 0; i < n; i++) {
+		const b = buf[i];
+		if (b === 0) return false;
+		if (b < 9 || (b > 13 && b < 32)) control++;
+	}
+	return control / n < 0.1;
+}
+
 export async function fetchUrl(url: string, signal?: AbortSignal): Promise<FetchOutcome> {
 	const target = normalizeUrl(url);
 	const res = await fetchWithTimeout(target, 20_000, signal, {
@@ -993,18 +1011,29 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 			source: "direct",
 		};
 	}
-	if (contentType.startsWith("text/") || raw.length < 100_000) {
-		return { lines: text.split("\n"), note: "", title: "", finalUrl, status, contentType, source: "direct" };
+	// MIME type first (JSON/HTML already handled above); the byte sniff
+	// only decides when the type is missing or ambiguous.
+	const textMime =
+		contentType.startsWith("text/") ||
+		contentType.includes("json") ||
+		contentType.includes("xml") ||
+		contentType.includes("javascript");
+	const binaryMime =
+		!textMime &&
+		contentType !== "application/octet-stream" &&
+		(/^(image|audio|video|font)\//.test(contentType) || /^(application|model)\//.test(contentType));
+	if (binaryMime || !looksLikeText(raw)) {
+		return {
+			lines: null,
+			note: `Binary content: ${contentType || "unknown type"}, ${raw.length} bytes (not displayed)`,
+			title: "",
+			finalUrl,
+			status,
+			contentType,
+			source: "direct",
+		};
 	}
-	return {
-		lines: null,
-		note: `Binary content: ${contentType || "unknown type"}, ${raw.length} bytes (not displayed)`,
-		title: "",
-		finalUrl,
-		status,
-		contentType,
-		source: "direct",
-	};
+	return { lines: text.split("\n"), note: "", title: "", finalUrl, status, contentType, source: "direct" };
 }
 
 /**
