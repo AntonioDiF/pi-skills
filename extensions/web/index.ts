@@ -683,7 +683,7 @@ export function htmlToLines(html: string): { lines: string[]; title: string; des
 		usedMain = true;
 	} else {
 		const bodyM = html.match(/<body[^>]*>([\s\S]*)<\/body>/i) ?? html.match(/<body[^>]*>([\s\S]*)$/i);
-		source = bodyM ? bodyM[1] : stripTagsQuick(html);
+		source = bodyM ? bodyM[1] : html;
 	}
 
 	const s: WalkerState = {
