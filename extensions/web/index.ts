@@ -388,7 +388,8 @@ export async function searchWeb(
 	signal?: AbortSignal,
 	onProgress?: (msg: string) => void,
 ): Promise<{ results: SearchResult[]; provider: string; errors: string[] }> {
-	const count = Math.min(opts.count ?? 8, 20);
+	const c = Number.isFinite(opts.count) ? opts.count : 8;
+	const count = Math.max(1, Math.min(Math.trunc(c), 20)); // positive integer, 1..20
 	const errors: string[] = [];
 	let emptyProvider: string | undefined; // last backend that succeeded with 0 results
 	if (opts.provider === "firecrawl" && !firecrawlBase()) {
