@@ -126,11 +126,10 @@ function markFail(base: string, error?: string) {
 }
 function markWeak(base: string) {
 	const h = health.get(base) ?? { fails: 0, cooldownUntil: 0 };
-	if (h.fails < 1) {
-		h.fails = 1;
-		h.cooldownUntil = Date.now() + 60_000;
-		health.set(base, h);
-	}
+	if (h.cooldownUntil > Date.now()) return; // keep the longer active cooldown
+	if (h.fails < 1) h.fails = 1;
+	h.cooldownUntil = Date.now() + 60_000;
+	health.set(base, h);
 }
 function markOk(base: string) {
 	health.delete(base);
