@@ -3,12 +3,15 @@
  *
  * Tools:
  *   web_search — search the web. Tries SearXNG instances round-robin (with
- *                per-instance health tracking/cooldowns) and falls back to
- *                DuckDuckGo. This spreads load so no single backend throttles you.
- *                If an instance returns 0 results while reporting its engines
- *                as suspended, the query is retried once without the
- *                language/category/engines filters.
- *   web_fetch  — fetch a URL and return it as text. Supports:
+ *                per-instance health tracking/cooldowns). If SearXNG comes up
+ *                empty, a local Firecrawl (if configured) is used as a rescue
+ *                tier, then DuckDuckGo. This spreads load so no single
+ *                backend throttles you. If an instance returns 0 results
+ *                while reporting its engines as suspended, the query is
+ *                retried once without the language/category/engines filters.
+ *   web_fetch  — fetch a URL and return it as text. When Firecrawl is
+ *                configured it is tried first (JS-rendered markdown); any
+ *                failure falls back to a direct fetch. Supports:
  *                 - heading:  "Install"   → only the section under that heading
  *                 - pattern:  "foo.*bar"  → grep mode (line numbers + context)
  *                 - offset/limit → line window over the converted text
@@ -17,15 +20,19 @@
  * Commands:
  *   /web search <query> [count]
  *   /web fetch <url>
- *   /web instances        → show SearXNG instance health
+ *   /web instances        → show SearXNG instance + Firecrawl health
  *   /web help
  *
  * Config (env vars):
- *   PI_WEB_SEARXNG      comma/space separated SearXNG instance base URLs
- *                       (overrides the built-in list; run your own instance
- *                       for the most reliable results)
- *   PI_WEB_USER_AGENT   custom User-Agent for search + fetch
- *   PI_WEB_MAX_CHARS    default max_chars for web_fetch (default 12000)
+ *   PI_WEB_SEARXNG         comma/space separated SearXNG instance base URLs
+ *                          (overrides the built-in list; run your own instance
+ *                          for the most reliable results)
+ *   PI_WEB_FIRECRAWL       Firecrawl base URL (e.g. http://192.168.0.117:3002);
+ *                          used first for web_fetch and as a web_search rescue
+ *                          when SearXNG is empty
+ *   PI_WEB_FIRECRAWL_KEY   optional Bearer token for the Firecrawl instance
+ *   PI_WEB_USER_AGENT      custom User-Agent for search + fetch
+ *   PI_WEB_MAX_CHARS       default max_chars for web_fetch (default 12000)
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -74,6 +81,13 @@ function defaultMaxChars(): number {
 	const n = Number(process.env.PI_WEB_MAX_CHARS);
 	return Number.isFinite(n) && n > 0 ? n : 12000;
 }
+function firecrawlBase(): string {
+	const raw = process.env.PI_WEB_FIRECRAWL?.trim();
+	return raw ? raw.replace(/\/+$/, "") : "";
+}
+function firecrawlKey(): string {
+	return process.env.PI_WEB_FIRECRAWL_KEY?.trim() ?? "";
+}
 
 // ========================= search backends ===========================
 
@@ -90,7 +104,7 @@ export interface SearchOptions {
 	time_range?: "day" | "week" | "month" | "year";
 	category?: string;
 	engines?: string;
-	provider?: "auto" | "searxng" | "duckduckgo";
+	provider?: "auto" | "searxng" | "firecrawl" | "duckduckgo";
 }
 
 // Per-instance health: failures escalate into a cooldown; empty results
@@ -98,14 +112,16 @@ export interface SearchOptions {
 interface Health {
 	fails: number;
 	cooldownUntil: number;
+	lastError?: string;
 }
 const health = new Map<string, Health>();
 let rrCursor = 0;
 
-function markFail(base: string) {
+function markFail(base: string, error?: string) {
 	const h = health.get(base) ?? { fails: 0, cooldownUntil: 0 };
 	h.fails = Math.min(h.fails + 1, 6);
 	h.cooldownUntil = Date.now() + Math.min(10 * 60_000, 30_000 * 2 ** (h.fails - 1));
+	if (error) h.lastError = error;
 	health.set(base, h);
 }
 function markWeak(base: string) {
@@ -135,13 +151,20 @@ function candidateInstances(maxTries: number): string[] {
 	return out;
 }
 
+function healthLine(label: string, base: string): string {
+	const h = health.get(base);
+	if (!h || h.cooldownUntil <= Date.now()) {
+		return `  ok      ${label} ${base}${h?.lastError ? `  (last: ${h.lastError})` : ""}`;
+	}
+	const secs = Math.ceil((h.cooldownUntil - Date.now()) / 1000);
+	return `  down    ${label} ${base}  (cooldown ${secs}s, fails=${h.fails}${h.lastError ? `, ${h.lastError}` : ""})`;
+}
+
 export function instanceHealthReport(): string {
-	const lines = envInstances().map((b) => {
-		const h = health.get(b);
-		if (!h || h.cooldownUntil <= Date.now()) return `  ok      ${b}`;
-		const secs = Math.ceil((h.cooldownUntil - Date.now()) / 1000);
-		return `  down    ${b}  (cooldown ${secs}s, fails=${h.fails})`;
-	});
+	const lines = envInstances().map((b) => healthLine("searxng", b));
+	const fc = firecrawlBase();
+	if (fc) lines.push(healthLine("firecrawl", fc));
+	else lines.push("  (firecrawl not configured — set PI_WEB_FIRECRAWL)");
 	lines.push("");
 	lines.push(`rotation cursor: ${rrCursor} | override with PI_WEB_SEARXNG`);
 	return lines.join("\n");
@@ -205,6 +228,87 @@ export async function searxngSearch(
 			.slice(0, 20),
 		unresponsive,
 	};
+}
+
+// ------------------------- firecrawl backend -------------------------
+
+export interface FirecrawlScrapeResult {
+	markdown: string;
+	title?: string;
+	finalUrl?: string;
+	status: number;
+	contentType?: string;
+}
+
+/** POST to a Firecrawl endpoint, unwrapping the {success, data} envelope.
+ *  A short connect timeout (4s) keeps off-LAN failures from stalling on the
+ *  full undici default (10s) before the cooldown kicks in. */
+let fcDispatcher: unknown;
+let fcDispatcherTried = false;
+async function getFcDispatcher(): Promise<unknown> {
+	if (fcDispatcherTried) return fcDispatcher;
+	fcDispatcherTried = true;
+	try {
+		const mod = (await import("undici")) as { Agent?: new (o: object) => unknown };
+		fcDispatcher = mod.Agent ? new mod.Agent({ connectTimeout: 4000 }) : undefined;
+	} catch {
+		fcDispatcher = undefined;
+	}
+	return fcDispatcher;
+}
+
+async function firecrawlPost<T>(path: string, body: unknown, ms: number, signal?: AbortSignal): Promise<T> {
+	const base = firecrawlBase();
+	if (!base) throw new Error("firecrawl not configured (set PI_WEB_FIRECRAWL)");
+	const dispatcher = await getFcDispatcher();
+	const res = await fetchWithTimeout(new URL(base + path), ms, signal, {
+		method: "POST",
+		headers: {
+			"User-Agent": userAgent(),
+			"Content-Type": "application/json",
+			...(firecrawlKey() ? { Authorization: `Bearer ${firecrawlKey()}` } : {}),
+		},
+		body: JSON.stringify(body),
+		...(dispatcher ? { dispatcher } : {}),
+	} as RequestInit);
+	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	const data = (await res.json()) as { success?: boolean; code?: string; error?: string; data?: T };
+	if (data.success === false) throw new Error(data.code ?? data.error ?? "firecrawl error");
+	if (data.data === undefined) throw new Error("unexpected response shape");
+	return data.data;
+}
+
+/** Scrape one URL to clean markdown via Firecrawl (JS-rendered). */
+export async function firecrawlScrape(url: string, signal?: AbortSignal): Promise<FirecrawlScrapeResult> {
+	const data = await firecrawlPost<{ markdown?: string; metadata?: Record<string, unknown> }>(
+		"/v2/scrape",
+		{ url, formats: ["markdown"] },
+		20_000,
+		signal,
+	);
+	const markdown = data.markdown ?? "";
+	if (!markdown.trim()) throw new Error("empty markdown");
+	const meta = data.metadata ?? {};
+	return {
+		markdown,
+		title: typeof meta.title === "string" && meta.title ? meta.title : undefined,
+		finalUrl: typeof meta.url === "string" && meta.url ? meta.url : undefined,
+		status: typeof meta.statusCode === "number" ? meta.statusCode : 200,
+		contentType: typeof meta.contentType === "string" ? meta.contentType : undefined,
+	};
+}
+
+/** Web search via Firecrawl; maps to the shared SearchResult shape. */
+export async function firecrawlSearch(q: string, limit: number, signal?: AbortSignal): Promise<SearchResult[]> {
+	const data = await firecrawlPost<{ web?: Array<Record<string, unknown>> }>("/v2/search", { query: q, limit }, 15_000, signal);
+	return (data.web ?? [])
+		.map((r) => ({
+			title: String(r.title ?? "").trim(),
+			url: String(r.url ?? "").trim(),
+			snippet: typeof r.description === "string" && r.description.trim() ? r.description.trim() : undefined,
+		}))
+		.filter((r) => r.url)
+		.slice(0, 20);
 }
 
 const DDG_DUR: Record<string, string> = { day: "d", week: "w", month: "m", year: "y" };
@@ -288,8 +392,11 @@ export async function searchWeb(
 	const count = Math.min(opts.count ?? 8, 20);
 	const errors: string[] = [];
 	let emptyProvider: string | undefined; // last backend that succeeded with 0 results
+	if (opts.provider === "firecrawl" && !firecrawlBase()) {
+		throw new Error("firecrawl not configured (set PI_WEB_FIRECRAWL)");
+	}
 
-	if (opts.provider !== "duckduckgo") {
+	if (opts.provider !== "duckduckgo" && opts.provider !== "firecrawl") {
 		const instances = candidateInstances(4); // cap: don't hammer every instance per query
 		let emptyCount = 0;
 		for (const base of instances) {
@@ -323,7 +430,34 @@ export async function searchWeb(
 		if (emptyCount > 0) errors.push(`${emptyCount} instance(s) returned 0 results`);
 	}
 
-	if (opts.provider !== "searxng") {
+	// Firecrawl tier: forced via provider=firecrawl, or (in auto mode) a
+	// rescue when the SearXNG tier came up empty. Firecrawl's search shares
+	// the local SearXNG upstream in many setups, but it occasionally succeeds
+	// where a single SearXNG pass failed (retries/second provider), so it is
+	// worth trying before falling back to DuckDuckGo.
+	const fcBase = firecrawlBase();
+	if (opts.provider === "firecrawl" || (opts.provider !== "searxng" && opts.provider !== "duckduckgo" && fcBase)) {
+		if (opts.provider !== "firecrawl" && (health.get(fcBase)?.cooldownUntil ?? 0) > Date.now()) {
+			errors.push("firecrawl: in cooldown, skipped");
+		} else {
+			try {
+				onProgress?.(opts.provider === "firecrawl" ? "searching firecrawl…" : "searching firecrawl (rescue)…");
+				const results = await firecrawlSearch(q, count, signal);
+				if (results.length > 0) {
+					markOk(fcBase);
+					return { results: results.slice(0, count), provider: "firecrawl", errors };
+				}
+				emptyProvider = "firecrawl";
+				errors.push("firecrawl: 0 results");
+				markWeak(fcBase);
+			} catch (e) {
+				markFail(fcBase, errMsg(e));
+				errors.push(`firecrawl: ${errMsg(e)}`);
+			}
+		}
+	}
+
+	if (opts.provider !== "searxng" && opts.provider !== "firecrawl") {
 		try {
 			onProgress?.("searching duckduckgo…");
 			const results = await ddgSearch(q, opts, signal);
@@ -746,6 +880,7 @@ export interface FetchOutcome {
 	finalUrl: string;
 	status: number;
 	contentType: string;
+	source: "firecrawl" | "direct";
 }
 
 function normalizeUrl(url: string): string {
@@ -815,6 +950,7 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 			finalUrl,
 			status,
 			contentType,
+			source: "direct",
 		};
 	}
 	const text = raw.toString("utf-8");
@@ -830,7 +966,7 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 		} catch {
 			/* keep raw */
 		}
-		return { lines: pretty.split("\n"), note: "", title: "", finalUrl, status, contentType };
+		return { lines: pretty.split("\n"), note: "", title: "", finalUrl, status, contentType, source: "direct" };
 	}
 	if (looksHtml) {
 		const conv = htmlToLines(text);
@@ -842,10 +978,11 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 			finalUrl,
 			status,
 			contentType,
+			source: "direct",
 		};
 	}
 	if (contentType.startsWith("text/") || raw.length < 100_000) {
-		return { lines: text.split("\n"), note: "", title: "", finalUrl, status, contentType };
+		return { lines: text.split("\n"), note: "", title: "", finalUrl, status, contentType, source: "direct" };
 	}
 	return {
 		lines: null,
@@ -854,7 +991,37 @@ export async function fetchUrl(url: string, signal?: AbortSignal): Promise<Fetch
 		finalUrl,
 		status,
 		contentType,
+		source: "direct",
 	};
+}
+
+/**
+ * Fetch with Firecrawl first (JS-rendered, clean markdown — a big win on
+ * JS-heavy pages) when configured, falling back to a direct fetch on any
+ * failure. Cooldown health on the Firecrawl base keeps us from paying a
+ * connection timeout on every fetch when the instance is unreachable
+ * (e.g. off the local network).
+ */
+export async function fetchUrlSmart(url: string, signal?: AbortSignal): Promise<FetchOutcome> {
+	const fcBase = firecrawlBase();
+	if (fcBase && (health.get(fcBase)?.cooldownUntil ?? 0) <= Date.now()) {
+		try {
+			const fc = await firecrawlScrape(normalizeUrl(url), signal);
+			markOk(fcBase);
+			return {
+				lines: fc.markdown.split("\n"),
+				note: "",
+				title: fc.title ?? "",
+				finalUrl: fc.finalUrl ?? normalizeUrl(url),
+				status: fc.status,
+				contentType: fc.contentType ?? "text/markdown",
+				source: "firecrawl",
+			};
+		} catch (e) {
+			markFail(fcBase, errMsg(e));
+		}
+	}
+	return fetchUrl(url, signal);
 }
 
 // ------------------------- view: section / grep ------------------------
@@ -1016,8 +1183,8 @@ const searchSchema = Type.Object({
 	),
 	engines: Type.Optional(Type.String({ description: "SearXNG engine filter, e.g. 'google,github'" })),
 	provider: Type.Optional(
-		Type.Union([Type.Literal("auto"), Type.Literal("searxng"), Type.Literal("duckduckgo")], {
-			description: "Backend (default auto: SearXNG rotation, then DuckDuckGo)",
+		Type.Union([Type.Literal("auto"), Type.Literal("searxng"), Type.Literal("firecrawl"), Type.Literal("duckduckgo")], {
+			description: "Backend (default auto: SearXNG rotation, Firecrawl rescue when empty, then DuckDuckGo)",
 		}),
 	),
 });
@@ -1083,8 +1250,8 @@ export default function webExtension(pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			"Search the web using rotating SearXNG instances with DuckDuckGo fallback. Returns titles, URLs and snippets.",
-		promptSnippet: "Search the web (SearXNG instance rotation + DuckDuckGo fallback)",
+			"Search the web using rotating SearXNG instances, with a Firecrawl rescue when SearXNG is empty, then DuckDuckGo fallback. Returns titles, URLs and snippets.",
+		promptSnippet: "Search the web (SearXNG rotation + Firecrawl rescue + DuckDuckGo fallback)",
 		promptGuidelines: [
 			"Use web_search for web searches; use web_fetch to read page content (heading= for a section, pattern= to grep).",
 		],
@@ -1107,12 +1274,12 @@ export default function webExtension(pi: ExtensionAPI) {
 		name: "web_fetch",
 		label: "Web Fetch",
 		description:
-			"Fetch a URL and return its content as text. HTML is converted to markdown-like text (headings, lists, code blocks, tables, links). Use heading= to fetch one section, pattern= to grep lines, offset/limit to page through long pages.",
-		promptSnippet: "Fetch a URL as text; supports heading sections, regex grep, line windows",
+			"Fetch a URL and return its content as text. Uses a local Firecrawl instance when configured (JS-rendered, clean markdown), falling back to a direct fetch. HTML is converted to markdown-like text (headings, lists, code blocks, tables, links). Use heading= to fetch one section, pattern= to grep lines, offset/limit to page through long pages.",
+		promptSnippet: "Fetch a URL as text (Firecrawl first when configured); supports heading sections, regex grep, line windows",
 		parameters: fetchSchema,
 		async execute(_toolCallId, params, signal, onUpdate) {
-			const outcome = await fetchUrl(params.url, signal);
-			onUpdate?.({ content: [{ type: "text", text: `fetched ${outcome.finalUrl} (${outcome.status})` }], details: { url: outcome.finalUrl } });
+			const outcome = await fetchUrlSmart(params.url, signal);
+			onUpdate?.({ content: [{ type: "text", text: `fetched ${outcome.finalUrl} (${outcome.status})` }], details: { url: outcome.finalUrl, source: outcome.source } });
 			if (outcome.lines === null) {
 				return {
 					content: [
@@ -1121,10 +1288,13 @@ export default function webExtension(pi: ExtensionAPI) {
 							text: `URL: ${outcome.finalUrl}\nStatus: ${outcome.status}\n${outcome.note}`,
 						},
 					],
-					details: { url: outcome.finalUrl, status: outcome.status },
+					details: { url: outcome.finalUrl, status: outcome.status, source: outcome.source },
 				};
 			}
-			const meta = [`URL: ${outcome.finalUrl}`, `Status: ${outcome.status} | Type: ${outcome.contentType || "unknown"}`];
+			const meta = [
+				`URL: ${outcome.finalUrl}`,
+				`Status: ${outcome.status} | Type: ${outcome.contentType || "unknown"}${outcome.source === "firecrawl" ? " | via firecrawl" : ""}`,
+			];
 			if (outcome.title) meta.push(`Title: ${outcome.title}`);
 			if (outcome.description) meta.push(`Description: ${truncate(outcome.description, 200)}`);
 			if (outcome.note) meta.push(outcome.note);
@@ -1154,10 +1324,10 @@ export default function webExtension(pi: ExtensionAPI) {
 					"pi-web commands:",
 					"  /web search <query> [count]   web search",
 					"  /web fetch <url>              fetch page as text",
-					"  /web instances                SearXNG instance health",
+					"  /web instances                SearXNG instance + Firecrawl health",
 					"",
 					"Tools: web_search, web_fetch (also callable by the model).",
-					"Env: PI_WEB_SEARXNG (instance list), PI_WEB_USER_AGENT, PI_WEB_MAX_CHARS.",
+					"Env: PI_WEB_SEARXNG (instance list), PI_WEB_FIRECRAWL (+_KEY), PI_WEB_USER_AGENT, PI_WEB_MAX_CHARS.",
 				].join("\n");
 				await show(help);
 				return;
@@ -1173,11 +1343,14 @@ export default function webExtension(pi: ExtensionAPI) {
 				} else if (parts[0] === "fetch") {
 					const url = parts[1];
 					if (!url) throw new Error("usage: /web fetch <url>");
-					const outcome = await fetchUrl(url);
+					const outcome = await fetchUrlSmart(url);
 					if (outcome.lines === null) {
 						text = `URL: ${outcome.finalUrl}\nStatus: ${outcome.status}\n${outcome.note}`;
 					} else {
-						const meta = [`URL: ${outcome.finalUrl}`, `Status: ${outcome.status}`];
+						const meta = [
+							`URL: ${outcome.finalUrl}`,
+							`Status: ${outcome.status}${outcome.source === "firecrawl" ? " | via firecrawl" : ""}`,
+						];
 						if (outcome.title) meta.push(`Title: ${outcome.title}`);
 						text = applyView(outcome.lines, {}, meta);
 					}
