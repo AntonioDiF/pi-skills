@@ -52,7 +52,7 @@ In the TUI the output opens in a scrollable overlay (j/k scroll, q close).
 
 | Variable             | Default | Description |
 | -------------------- | ------- | ----------- |
-| `PI_WEB_SEARXNG`     | 20 public instances | Comma/space-separated SearXNG base URLs. Public instances are often throttled (especially from datacenter IPs) — for reliable JSON results run your own (`docker run -p 8080:8080 searxng/searxng` + `search.formats: [html, json]`) and set `PI_WEB_SEARXNG=https://localhost:8080`. |
+| `PI_WEB_SEARXNG`     | built-in list of public instances | Comma/space-separated SearXNG base URLs. Public instances are often throttled (especially from datacenter IPs) — for reliable JSON results run your own (`docker run -p 8080:8080 searxng/searxng` + `search.formats: [html, json]`) and set `PI_WEB_SEARXNG=https://localhost:8080`. |
 | `PI_WEB_USER_AGENT`  | Firefox 130 UA | UA for search + fetch |
 | `PI_WEB_MAX_CHARS`   | 12000  | Default `max_chars` for `web_fetch` |
 
