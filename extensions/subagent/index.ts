@@ -492,7 +492,10 @@ const TaskItem = Type.Object({
 const SubagentParams = Type.Object({
 	task: Type.Optional(TaskItem.properties.task),
 	tasks: Type.Optional(
-		Type.Array(TaskItem, { description: `Parallel tasks (max ${MAX_PARALLEL}, ${CONCURRENCY} concurrent)` }),
+		Type.Array(
+			TaskItem,
+			{ description: `Parallel tasks (max ${MAX_PARALLEL}, ${CONCURRENCY} concurrent). Top-level model/thinking/system/tools/cwd apply to all tasks; per-task values take precedence.` },
+		),
 	),
 	agent: Type.Optional(
 		Type.String({ description: "Reserved for named agent definitions (not supported yet; use system for role instructions)" }),
@@ -529,10 +532,9 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const emptyTask = (specs: TaskSpec[]) => specs.find((s) => !s.task.trim());
-			const single: TaskSpec[] | null = params.task
-				? [{ task: params.task, model: params.model, thinking: params.thinking, system: params.system, tools: params.tools, cwd: params.cwd }]
-				: null;
-			const tasks = params.tasks ?? null;
+			const topLevel: Partial<TaskSpec> = { model: params.model, thinking: params.thinking, system: params.system, tools: params.tools, cwd: params.cwd };
+			const single: TaskSpec[] | null = params.task ? [{ task: params.task, ...topLevel }] : null;
+			const tasks: TaskSpec[] | null = params.tasks ? params.tasks.map((t) => ({ ...topLevel, ...t })) : null;
 
 			if (single && emptyTask(single)) return textResult("task must not be empty.", details("single", []));
 			if (tasks && emptyTask(tasks)) return textResult("Each parallel task needs a non-empty task.", details("parallel", []));

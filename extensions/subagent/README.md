@@ -13,7 +13,8 @@ subagent's final answer plus usage stats (turns, tokens, context, model).
 - **Single mode**: `{ task, ... }`
 - **Parallel mode**: `{ tasks: [{ task, ... }, ...] }` — up to 8 tasks, 4
   concurrent. Use it for independent work (e.g. "review module A" and
-  "review module B").
+  "review module B"). Top-level `model`/`thinking`/`system`/`tools`/`cwd`
+  apply to all tasks; per-task values take precedence.
 - The subagent does **not** see the parent conversation. The task must be
   self-contained: file paths, code, constraints.
 - Live progress streams into the tool output while the subagent runs; Ctrl+C
