@@ -8,7 +8,7 @@ self-contained tasks in separate pi sessions with isolated context windows.
 ### `subagent`
 
 Runs a task in a `pi --mode json -p --no-session` subprocess and returns the
-subagent's final answer plus usage stats (turns, tokens, context, model).
+subagent's final answer plus usage stats (turns, tokens, cost, context, model).
 
 - **Single mode**: `{ task, ... }`
 - **Parallel mode**: `{ tasks: [{ task, ... }, ...] }` — up to 8 tasks, 4

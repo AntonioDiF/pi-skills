@@ -511,7 +511,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Subagent",
 		description: [
 			"Delegate a self-contained task to a subagent: a separate pi session with its own context window.",
-			"Returns the subagent's final answer plus usage stats (turns, tokens, context, model).",
+			"Returns the subagent's final answer plus usage stats (turns, tokens, cost, context, model).",
 			"The subagent does NOT see this conversation: include all needed context in the task.",
 			`Defaults to the current model at medium thinking (if the model supports it); override with model (e.g. "adf/adf-mini") and/or thinking (e.g. "xhigh").`,
 			`Use tasks for independent parallel work (max ${MAX_PARALLEL}, ${CONCURRENCY} concurrent).`,
