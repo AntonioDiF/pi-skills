@@ -141,12 +141,14 @@ function candidateInstances(maxTries: number): string[] {
 	if (all.length === 0) return [];
 	const now = Date.now();
 	const fresh = all.filter((b) => (health.get(b)?.cooldownUntil ?? 0) <= now);
-	const pool = fresh.length > 0 ? fresh : all;
+	// If every instance is cooling down, return nothing: retrying them all on
+	// each query would keep extending the cooldowns and delay the fallback tiers.
+	if (fresh.length === 0) return [];
 	const out: string[] = [];
-	for (let i = 0; i < pool.length && out.length < maxTries; i++) {
-		out.push(pool[(rrCursor + i) % pool.length]);
+	for (let i = 0; i < fresh.length && out.length < maxTries; i++) {
+		out.push(fresh[(rrCursor + i) % fresh.length]);
 	}
-	rrCursor = (rrCursor + 1) % pool.length;
+	rrCursor = (rrCursor + 1) % fresh.length;
 	return out;
 }
 
@@ -271,7 +273,14 @@ async function firecrawlPost<T>(path: string, body: unknown, ms: number, signal?
 		...(dispatcher ? { dispatcher } : {}),
 	} as RequestInit);
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
-	const data = (await res.json()) as { success?: boolean; code?: string; error?: string; data?: T };
+	const raw = await readBodyCapped(res);
+	if (raw === null) throw new Error(`response too large (over ${MAX_FETCH_BYTES.toLocaleString("en-US")} bytes)`);
+	let data: { success?: boolean; code?: string; error?: string; data?: T };
+	try {
+		data = JSON.parse(raw.toString("utf-8"));
+	} catch {
+		throw new Error("unexpected response shape");
+	}
 	if (data.success === false) throw new Error(data.code ?? data.error ?? "firecrawl error");
 	if (data.data === undefined) throw new Error("unexpected response shape");
 	return data.data;
@@ -291,7 +300,13 @@ export async function firecrawlScrape(url: string, signal?: AbortSignal): Promis
 	return {
 		markdown,
 		title: typeof meta.title === "string" && meta.title ? meta.title : undefined,
-		finalUrl: typeof meta.url === "string" && meta.url ? meta.url : undefined,
+		// Firecrawl v2 reports the resolved URL as metadata.sourceURL; keep url as a compat fallback.
+		finalUrl:
+			typeof meta.sourceURL === "string" && meta.sourceURL
+				? meta.sourceURL
+				: typeof meta.url === "string" && meta.url
+					? meta.url
+					: undefined,
 		status: typeof meta.statusCode === "number" ? meta.statusCode : 200,
 		contentType: typeof meta.contentType === "string" ? meta.contentType : undefined,
 	};
@@ -656,7 +671,7 @@ interface WalkerState {
 	headingLevel: number;
 	inMain: boolean;
 	skipStack: string[];
-	anchors: { href: string; startLen: number }[];
+	anchors: { href: string; startLen: number; annotated?: boolean }[];
 }
 
 function flushLine(s: WalkerState, listPrefix?: string) {
@@ -664,9 +679,17 @@ function flushLine(s: WalkerState, listPrefix?: string) {
 	if (listPrefix === undefined && s.liDepth > 0) {
 		listPrefix = "  ".repeat(Math.max(0, s.listDepth - 1)) + "- ";
 	}
-	const text = s.buf.replace(/\s+/g, " ").trim();
+	let text = s.buf.replace(/\s+/g, " ").trim();
 	s.buf = "";
 	if (!text) return;
+	// A block flush inside an open <a> would otherwise drop the URL: annotate the emitted line.
+	if (s.anchors.length > 0) {
+		const a = s.anchors[s.anchors.length - 1];
+		if (!a.annotated) {
+			text += ` (${a.href})`;
+			a.annotated = true;
+		}
+	}
 	if (s.inTable) {
 		s.buf = text; // keep as cell content
 		return;
@@ -734,7 +757,7 @@ export function htmlToLines(html: string): { lines: string[]; title: string; des
 			switch (name) {
 				case "a": {
 					const a = s.anchors.pop();
-					if (a && s.buf.length > a.startLen) {
+					if (a && !a.annotated && s.buf.length > a.startLen) {
 						const inner = s.buf.slice(a.startLen);
 						s.buf = s.buf.slice(0, a.startLen) + `${inner} (${a.href})`;
 					}
@@ -1073,12 +1096,31 @@ export async function fetchUrlSmart(url: string, signal?: AbortSignal): Promise<
 
 // ------------------------- view: section / grep ------------------------
 
+/** Per-line mask: true inside fenced code blocks (``` / ~~~), so heading-like
+ *  lines in code samples are not treated as document headings. */
+function fenceMask(lines: string[]): boolean[] {
+	const mask = new Array<boolean>(lines.length).fill(false);
+	let open = "";
+	for (let i = 0; i < lines.length; i++) {
+		const m = lines[i].match(/^ {0,3}(`{3,}|~{3,})/);
+		if (m && (!open || (m[1][0] === open[0] && m[1].length >= open.length))) {
+			open = open ? "" : m[1];
+			if (!open) mask[i] = true;
+		} else if (open) {
+			mask[i] = true;
+		}
+	}
+	return mask;
+}
+
 /** Lines under `heading` (case-insensitive substring) until next same/higher-level heading. */
 export function sectionByHeading(lines: string[], heading: string): string[] | null {
 	const needle = heading.toLowerCase();
+	const mask = fenceMask(lines);
 	let start = -1;
 	let level = 0;
 	for (let i = 0; i < lines.length; i++) {
+		if (mask[i]) continue;
 		const m = lines[i].match(/^(#{1,6})\s+(.*)$/);
 		if (m && m[2].toLowerCase().includes(needle)) {
 			start = i;
@@ -1089,6 +1131,7 @@ export function sectionByHeading(lines: string[], heading: string): string[] | n
 	if (start === -1) return null;
 	let end = lines.length;
 	for (let i = start + 1; i < lines.length; i++) {
+		if (mask[i]) continue;
 		const m = lines[i].match(/^(#{1,6})\s/);
 		if (m && m[1].length <= level) {
 			end = i;
@@ -1099,8 +1142,10 @@ export function sectionByHeading(lines: string[], heading: string): string[] | n
 }
 
 export function listHeadings(lines: string[], max = 40): string[] {
+	const mask = fenceMask(lines);
 	const out: string[] = [];
 	for (let i = 0; i < lines.length && out.length < max; i++) {
+		if (mask[i]) continue;
 		const m = lines[i].match(/^(#{1,6})\s+(.*)$/);
 		if (m) out.push(`  ${"#".repeat(m[1].length)} ${truncate(m[2], 70)}  (line ${i + 1})`);
 	}
