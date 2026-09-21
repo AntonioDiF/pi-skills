@@ -377,6 +377,8 @@ async function runSubagent(
 				stdio: ["ignore", "pipe", "pipe"],
 				env: { ...process.env, PI_SUBAGENT_DEPTH: String(CURRENT_DEPTH + 1) },
 			});
+			proc.stdout.setEncoding("utf8");
+			proc.stderr.setEncoding("utf8");
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -408,15 +410,15 @@ async function runSubagent(
 				emit();
 			};
 
-			proc.stdout.on("data", (data: Buffer) => {
-				buffer += data.toString();
+			proc.stdout.on("data", (data: string) => {
+				buffer += data;
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
 			});
 
-			proc.stderr.on("data", (data: Buffer) => {
-				result.stderr += data.toString();
+			proc.stderr.on("data", (data: string) => {
+				result.stderr += data;
 			});
 
 			proc.on("close", (code) => {
@@ -533,7 +535,7 @@ export default function (pi: ExtensionAPI) {
 
 			const emptyTask = (specs: TaskSpec[]) => specs.find((s) => !s.task.trim());
 			const topLevel: Partial<TaskSpec> = { model: params.model, thinking: params.thinking, system: params.system, tools: params.tools, cwd: params.cwd };
-			const single: TaskSpec[] | null = params.task ? [{ task: params.task, ...topLevel }] : null;
+			const single: TaskSpec[] | null = params.task !== undefined ? [{ task: params.task, ...topLevel }] : null;
 			const tasks: TaskSpec[] | null = params.tasks ? params.tasks.map((t) => ({ ...topLevel, ...t })) : null;
 
 			if (single && emptyTask(single)) return textResult("task must not be empty.", details("single", []));
