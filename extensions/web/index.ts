@@ -36,6 +36,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ============================== config ==============================
@@ -1309,11 +1310,11 @@ function makeTextView(tui: { requestRender(): void }, title: string, lines: stri
 	const height = 18;
 	return {
 		render(width: number): string[] {
-			const out: string[] = [title.slice(0, width)];
+			const out: string[] = [truncateToWidth(title, width)];
 			const end = Math.min(lines.length, scroll + height);
-			for (let i = scroll; i < end; i++) out.push(lines[i] === "" ? " " : lines[i]);
-			if (lines.length > end) out.push(`… ${lines.length - end} more — j/k scroll, q close`);
-			else out.push("q to close");
+			for (let i = scroll; i < end; i++) out.push(truncateToWidth(lines[i] === "" ? " " : lines[i], width));
+			if (lines.length > end) out.push(truncateToWidth(`… ${lines.length - end} more — j/k scroll, q close`, width));
+			else out.push(truncateToWidth("q to close", width));
 			return out;
 		},
 		invalidate() {},
