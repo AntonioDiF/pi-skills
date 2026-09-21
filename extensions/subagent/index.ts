@@ -312,13 +312,15 @@ function progressText(r: TaskResult): string {
 	return head + (r.finalText || "(working...)");
 }
 
-function parallelProgress(results: TaskResult[]): string {
+function parallelProgress(results: (TaskResult | undefined)[]): string {
 	return results
 		.map((r, i) => {
+			if (!r) return null;
 			const turns = r.usage.turns > 0 ? `, ${r.usage.turns} turns` : "";
 			const text = tail((r.finalText || "(working...)").replace(/\n+/g, " "), 200);
 			return `[${i + 1}/${results.length}] ${r.modelLabel || "?"}${r.thinking ? ` (${r.thinking})` : ""} running${turns}: ${text}`;
 		})
+		.filter((line): line is string => line !== null)
 		.join("\n");
 }
 
@@ -565,7 +567,7 @@ export default function (pi: ExtensionAPI) {
 				runSubagent(spec, subCtx, signal, (r) => {
 					results[i] = r;
 					onUpdate?.({
-						content: [{ type: "text", text: parallelProgress(results.filter(Boolean) as TaskResult[]) }],
+						content: [{ type: "text", text: parallelProgress(results) }],
 						details: details("parallel", results.filter(Boolean) as TaskResult[]),
 					});
 				}).then((r) => {
