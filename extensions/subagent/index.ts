@@ -37,6 +37,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
@@ -119,16 +120,12 @@ function emptyUsage(): UsageStats {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
-function supportsLevel(model: Model<any>, level: ModelThinkingLevel): boolean {
-	if (level !== "off" && !model.reasoning) return false;
-	const map = model.thinkingLevelMap;
-	if (!map) return true;
-	const v = map[level];
-	return v !== undefined && v !== null;
+function supportedLevels(model: Model<any>): ModelThinkingLevel[] {
+	return getSupportedThinkingLevels(model);
 }
 
-function supportedLevels(model: Model<any>): ModelThinkingLevel[] {
-	return THINKING_LEVELS.filter((l) => supportsLevel(model, l));
+function supportsLevel(model: Model<any>, level: ModelThinkingLevel): boolean {
+	return supportedLevels(model).includes(level);
 }
 
 function findModel(registry: ModelRegistryLike, ref: string): Model<any> | undefined {
@@ -380,6 +377,7 @@ async function runSubagent(
 			proc.stdout.setEncoding("utf8");
 			proc.stderr.setEncoding("utf8");
 			let buffer = "";
+			let exited = false;
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -404,9 +402,11 @@ async function runSubagent(
 				}
 				result.stopReason = msg.stopReason;
 				result.errorMessage = msg.errorMessage;
+				let text = "";
 				for (const part of msg.content) {
-					if (part.type === "text" && part.text) result.finalText = part.text;
+					if (part.type === "text" && part.text) text = text ? `${text}\n\n${part.text}` : part.text;
 				}
+				if (text) result.finalText = text;
 				emit();
 			};
 
@@ -422,18 +422,22 @@ async function runSubagent(
 			});
 
 			proc.on("close", (code) => {
+				exited = true;
 				if (buffer.trim()) processLine(buffer);
 				resolve(code ?? 0);
 			});
 
-			proc.on("error", () => resolve(1));
+			proc.on("error", (err) => {
+				result.stderr = result.stderr ? `${result.stderr}\n${err.message}` : err.message;
+				resolve(1);
+			});
 
 			if (signal) {
 				const killProc = () => {
 					result.aborted = true;
 					proc.kill("SIGTERM");
 					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
+						if (!exited) proc.kill("SIGKILL");
 					}, 5000);
 					emit();
 				};
