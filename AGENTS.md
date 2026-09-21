@@ -21,7 +21,8 @@ symlinking the folder into `~/.pi/agent/`.
 ## GitHub
 - gh CLI is authed as AntonioDiF.
 - Thread replies: GraphQL mutation addPullRequestReviewThreadReply
-  (REST 404s; input needs the review's global ID, not the db id).
+  (REST 404s; pass only pullRequestReviewThreadId, a review ID
+  makes it silently no-op).
 
 ## Style
 - Short and concise. No em-dashes, no AI-sounding filler.
