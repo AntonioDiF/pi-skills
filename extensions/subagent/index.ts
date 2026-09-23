@@ -461,7 +461,14 @@ async function runSubagent(
 					emit();
 				};
 				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
+				else {
+					// Drop the listener once the child is gone: a later abort of the
+					// run signal must not touch a finished result or signal a dead group.
+					const detach = () => signal.removeEventListener("abort", killProc);
+					signal.addEventListener("abort", killProc, { once: true });
+					proc.on("close", detach);
+					proc.on("error", detach);
+				}
 			}
 		});
 
