@@ -369,7 +369,7 @@ async function runSubagent(
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
-				cwd: spec.cwd ?? ctx.cwd,
+				cwd: spec.cwd ? path.resolve(ctx.cwd, spec.cwd) : ctx.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 				env: { ...process.env, PI_SUBAGENT_DEPTH: String(CURRENT_DEPTH + 1) },
@@ -421,10 +421,15 @@ async function runSubagent(
 				result.stderr += data;
 			});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, sig) => {
 				exited = true;
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				if (code === null && sig) {
+					result.errorMessage = `terminated by ${sig}`;
+					resolve(1);
+				} else {
+					resolve(code ?? 0);
+				}
 			});
 
 			proc.on("error", (err) => {
