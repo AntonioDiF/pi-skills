@@ -371,6 +371,8 @@ async function runSubagent(
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: spec.cwd ? path.resolve(ctx.cwd, spec.cwd) : ctx.cwd,
 				shell: false,
+				// Own process group so abort can kill nested subagents too
+				detached: true,
 				stdio: ["ignore", "pipe", "pipe"],
 				env: { ...process.env, PI_SUBAGENT_DEPTH: String(CURRENT_DEPTH + 1) },
 			});
@@ -437,12 +439,24 @@ async function runSubagent(
 				resolve(1);
 			});
 
+			// Kill the whole process group: a nested pi can outlive a signal to the direct child.
+			// On win32 group kill is unsupported, so only the direct child is killed.
+			const killGroup = (sig: NodeJS.Signals) => {
+				if (proc.pid == null) return;
+				try {
+					if (process.platform === "win32") proc.kill(sig);
+					else process.kill(-proc.pid, sig);
+				} catch {
+					/* ESRCH: already gone */
+				}
+			};
+
 			if (signal) {
 				const killProc = () => {
 					result.aborted = true;
-					proc.kill("SIGTERM");
+					killGroup("SIGTERM");
 					setTimeout(() => {
-						if (!exited) proc.kill("SIGKILL");
+						if (!exited) killGroup("SIGKILL");
 					}, 5000);
 					emit();
 				};
